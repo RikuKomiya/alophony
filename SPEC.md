@@ -16,7 +16,7 @@ The system is designed as a long-running daemon rather than a one-shot CLI. It m
 - Language: TypeScript.
 - Runtime: Node.js 22 LTS or newer.
 - Module format: ESM.
-- Package manager: pnpm.
+- Package manager: Bun.
 - Validation: Zod.
 - Logging: Pino structured logs.
 - Tests: Vitest.

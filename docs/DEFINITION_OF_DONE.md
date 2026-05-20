@@ -3,7 +3,7 @@
 This document maps `SPEC.md` section 18 to the implementation.
 
 - TypeScript project builds in strict mode.
-  - `pnpm typecheck` passes.
+  - `bun run typecheck` passes.
 - Migrations create all required tables and indexes.
   - `migrations/0001_initial.sql` creates `issues`, `runs`, `run_attempts`, `run_events`, `scheduler_locks`, and `schema_migrations`, plus indexes.
 - `alophony validate` catches missing config, DB auth failure, tracker auth failure, and missing Codex command.
@@ -30,7 +30,7 @@ This document maps `SPEC.md` section 18 to the implementation.
 - Structured logs include run and issue context.
   - Pino logger is used, and scheduler/runner paths attach issue/run/attempt context where available.
 - Core unit and integration tests pass.
-  - `pnpm test` covers config, repository, locks, workspace safety, prompt rendering, scheduler, retry, and fake Codex.
+  - `bun run test` covers config, repository, locks, workspace safety, prompt rendering, scheduler, retry, and fake Codex.
 
 Known v1 boundaries:
 

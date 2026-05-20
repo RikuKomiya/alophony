@@ -5,7 +5,7 @@ Alophony is a TypeScript orchestration daemon for dispatching tracker issues to 
 ## Stack
 
 - TypeScript, Node.js 22+, ESM
-- pnpm
+- Bun
 - Turso via `@libsql/client`
 - Zod config validation
 - Pino structured logs
@@ -15,9 +15,9 @@ Alophony is a TypeScript orchestration daemon for dispatching tracker issues to 
 ## Setup
 
 ```sh
-pnpm install
-pnpm typecheck
-pnpm test
+bun install
+bun run typecheck
+bun run test
 ```
 
 Required environment variables for Linear + Turso:
@@ -33,7 +33,7 @@ export CODEX_MODEL="..."
 For local development and tests, use a file database and fake tracker:
 
 ```sh
-pnpm tsx src/cli/index.ts validate \
+bunx tsx src/cli/index.ts validate \
   --tracker-kind fake \
   --tracker-project-slug TEST \
   --database-url "file:.alophony/dev.db" \
@@ -82,11 +82,11 @@ export default {
 ## CLI
 
 ```sh
-pnpm tsx src/cli/index.ts migrate
-pnpm tsx src/cli/index.ts validate
-pnpm tsx src/cli/index.ts start --api
-pnpm tsx src/cli/index.ts status
-pnpm tsx src/cli/index.ts run-once <issue-id>
+bunx tsx src/cli/index.ts migrate
+bunx tsx src/cli/index.ts validate
+bunx tsx src/cli/index.ts start --api
+bunx tsx src/cli/index.ts status
+bunx tsx src/cli/index.ts run-once <issue-id>
 ```
 
 The built package exposes the same commands through `alophony`.
@@ -117,8 +117,8 @@ Mutation endpoints require `api.operatorToken` when configured.
 ## Verification
 
 ```sh
-pnpm typecheck
-pnpm test
-pnpm build
+bun run typecheck
+bun run test
+bun run build
 ```
 # alophony
