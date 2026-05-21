@@ -1,7 +1,7 @@
 # Alophony Specification
 
 Status: Draft
-Last updated: 2026-05-20
+Last updated: 2026-05-22
 
 ## 1. Overview
 
@@ -23,7 +23,8 @@ The system is designed as a long-running daemon rather than a one-shot CLI. It m
 
 ### 2.2 Database
 
-- Primary database: Turso.
+- Primary production database: Turso.
+- Local development database: SQLite/libSQL file database via `file:` URLs.
 - SQL dialect: SQLite-compatible SQL.
 - TypeScript client for v1: `@libsql/client`.
   - Rationale: v1 prioritizes stable Turso Cloud access, mature ecosystem behavior, and predictable migrations over adopting the newest Turso TypeScript package immediately.
@@ -36,6 +37,8 @@ The system is designed as a long-running daemon rather than a one-shot CLI. It m
 - Agent runner: `codex app-server`.
 - Transport: subprocess stdio.
 - Protocol: the targeted Codex app-server JSON-RPC/JSONL protocol.
+  - Current implementation targets the app-server v2 flow documented by OpenAI:
+    `initialize` -> `initialized` notification -> `thread/start` -> `turn/start`.
 - Protocol types must be generated from the installed Codex app-server when available, using the command exposed by that Codex version.
 - The app-server process is launched per run attempt in the issue workspace.
 
@@ -83,7 +86,7 @@ Main services:
 - `ConfigService`: loads and validates runtime configuration.
 - `TrackerClient`: reads candidate issues and current issue state.
 - `Scheduler`: selects eligible work, acquires locks, and starts attempts.
-- `RunCoordinator`: owns active in-process attempts.
+- `RunCoordinator`: owns active in-process attempts. In the current v1 implementation this responsibility is held inside `Scheduler` rather than a separate service.
 - `WorkspaceManager`: creates, validates, and cleans workspaces.
 - `CodexAppServerClient`: launches Codex, starts sessions, streams events, and maps failures.
 - `RunRepository`: reads and writes Turso state.
@@ -107,7 +110,7 @@ Required fields:
 - `tracker.activeStates`.
 - `tracker.terminalStates`.
 - `database.url`.
-- `database.authToken` or environment variable reference.
+- `database.authToken` or environment variable reference for remote Turso URLs. Local `file:` databases do not require an auth token.
 - `workspace.root`.
 - `codex.command`: default `codex app-server`.
 - `scheduler.pollIntervalMs`.
@@ -252,8 +255,11 @@ Prevents duplicate dispatch across processes.
 
 Lock keys:
 
-- `global:scheduler`
 - `issue:<tracker_kind>:<tracker_issue_id>`
+
+Reserved for future multi-process scheduling:
+
+- `global:scheduler`
 - `run:<run_id>`
 
 #### `schema_migrations`
@@ -271,7 +277,7 @@ Lock acquisition must be implemented as an atomic insert/update transaction:
 2. If it exists and `expires_at` is in the past, replace owner and expiry.
 3. Otherwise, acquisition fails.
 
-The active process must renew locks while an attempt is running. If lock renewal fails, the attempt must stop itself and mark the run as `failed` with reason `lock_lost`.
+The active process must renew locks while an attempt is running. Current v1 logs renewal failures. A later hardening pass should stop the attempt and mark the run as `failed` with reason `lock_lost`.
 
 ### 7.3 Time Format
 
@@ -309,7 +315,7 @@ On daemon startup:
 1. Load and validate config.
 2. Connect to Turso.
 3. Run migrations.
-4. Generate or validate Codex protocol types when configured.
+4. Generate Codex protocol types when configured.
 5. Mark stale `running` attempts from the previous process as `failed` with reason `process_restarted`.
 6. Release expired locks owned by dead processes.
 7. Fetch terminal tracker issues and cleanup their workspaces.
@@ -350,8 +356,8 @@ For each active run:
 
 - If tracker issue is terminal: stop Codex, mark run `canceled`, cleanup workspace.
 - If tracker issue is no longer active: stop Codex, mark run `canceled`, keep workspace for inspection.
-- If the process is gone and lock expired: mark attempt `failed`.
-- If retry policy allows retry: move run to `retry_wait`.
+- If the process is gone and lock expired: mark attempt `failed`. Current v1 performs stale attempt cleanup during startup recovery; continuous reconcile hardening is still pending.
+- If retry policy allows retry: move run to `retry_wait`. Current v1 performs retry backoff in-process before creating the next attempt.
 
 ## 10. Workspace Management
 
@@ -413,31 +419,35 @@ The runner must keep stdout protocol traffic separate from stderr diagnostics.
 For each attempt:
 
 1. Spawn app-server subprocess.
-2. Initialize session using the installed Codex app-server protocol.
-3. Send the rendered prompt as a turn.
-4. Stream events until terminal result, timeout, or external cancellation.
-5. Persist Codex thread and turn identities when provided by the protocol.
-6. Stop subprocess.
+2. Send `initialize` with `clientInfo`.
+3. Send the `initialized` notification after initialization succeeds.
+4. Send `thread/start` with the workspace cwd, model, approval policy, sandbox mode, and ephemeral thread settings.
+5. Send `turn/start` with the rendered prompt as text input.
+6. Stream events until terminal result, timeout, or external cancellation.
+7. Persist Codex thread and turn identities when provided by the protocol.
+8. Stop subprocess.
 
 ### 12.3 Event Mapping
 
 Codex events must be mapped to normalized run events:
 
-- `session_started`
+- `thread_started`
 - `turn_started`
-- `assistant_message`
-- `tool_call_started`
-- `tool_call_finished`
+- `turn_completed`
+- `item_started`
+- `item_completed`
+- `item_agentMessage_delta`
+- `item_commandExecution_outputDelta`
 - `approval_requested`
 - `user_input_requested`
-- `turn_finished`
-- `session_failed`
+- `error`
 
 Approval and user-input-required events must not leave a run stalled indefinitely. In the first version:
 
 - Approval policy is configured before the run starts.
 - Interactive user input is unsupported.
 - If Codex requires input, the attempt fails with `needs_input_unsupported`.
+- External cancellation aborts the active Codex subprocess using `AbortSignal`.
 
 ### 12.4 Timeouts
 
@@ -508,7 +518,7 @@ Optional Fastify endpoints:
 - `GET /api/v1/events?runId=...`
 - `POST /api/v1/runs/:id/cancel`
 
-Mutation endpoints must require an operator token.
+Mutation endpoints should be configured with an operator token for production. Current v1 enforces bearer authentication when `api.operatorToken` is configured.
 
 ### 14.3 Metrics
 
@@ -524,6 +534,8 @@ Minimum metrics:
 - tracker poll failures
 - DB write failures
 
+Metrics are not implemented in the current v1 codebase. They remain a post-smoke-test hardening item.
+
 ## 15. Security
 
 - Turso auth token is loaded from environment or secret manager.
@@ -538,10 +550,12 @@ Minimum metrics:
 Required commands:
 
 - `alophony migrate`: apply database migrations.
-- `alophony validate`: validate config, DB connectivity, tracker connectivity, and Codex command availability.
+- `alophony validate`: validate config, DB connectivity, shallow tracker auth configuration, and Codex command availability.
 - `alophony start`: start daemon.
 - `alophony status`: print a runtime snapshot.
 - `alophony run-once <issue-id>`: dispatch one issue for debugging.
+
+`status`, `run-once`, and `start` run migrations before reading or writing orchestration tables so fresh local databases are usable during development.
 
 ## 17. Testing Requirements
 
@@ -560,6 +574,7 @@ Integration tests:
 - Turso-compatible local database migration.
 - fake tracker candidate dispatch.
 - fake Codex app-server subprocess event stream.
+- Codex app-server v2-style fake protocol stream.
 - process restart recovery.
 - terminal issue cleanup.
 
@@ -571,6 +586,11 @@ End-to-end smoke test:
 - Mark run succeeded.
 - Restart daemon and verify no duplicate dispatch.
 
+Manual smoke tests:
+
+- Linear + local `file:` database + real `codex app-server` dispatches a real Linear issue through `run-once` and marks the run `succeeded`.
+- Turso Cloud + real `codex app-server` remains a required production-readiness smoke test.
+
 ## 18. Definition of Done
 
 The first conforming implementation is complete when:
@@ -578,6 +598,7 @@ The first conforming implementation is complete when:
 - TypeScript project builds in strict mode.
 - Migrations create all required tables and indexes.
 - `alophony validate` catches missing config, DB auth failure, tracker auth failure, and missing Codex command.
+- `alophony validate` catches missing config, DB connectivity failure, Linear token absence for `linear`, and missing Codex command. Deep tracker API query validation is not yet implemented.
 - Scheduler dispatches eligible issues and respects max concurrency.
 - Turso locks prevent duplicate runs.
 - Codex app-server runner can process a full fake protocol stream.

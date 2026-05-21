@@ -19,8 +19,8 @@ describe("CodexAppServerClient", () => {
     expect(result.status).toBe("succeeded");
     expect(result.codexThreadId).toBe("thread_fake");
     expect(result.codexTurnId).toBe("turn_fake");
-    expect(events).toContain("session_started");
-    expect(events).toContain("turn_finished");
+    expect(events).toContain("thread_started");
+    expect(events).toContain("turn_completed");
   });
 
   it("fails unsupported user input requests explicitly", async () => {

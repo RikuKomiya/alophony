@@ -2,10 +2,12 @@ import type { FastifyInstance } from "fastify";
 import Fastify from "fastify";
 import type { AlophonyConfig } from "../config/schema.js";
 import type { RunRepository } from "../db/repository.js";
+import type { Scheduler } from "../scheduler/scheduler.js";
 
 export interface StatusApiDeps {
   config: AlophonyConfig["api"];
   repository: RunRepository;
+  scheduler?: Pick<Scheduler, "cancelRun"> | undefined;
 }
 
 export function createStatusApi(deps: StatusApiDeps): FastifyInstance {
@@ -44,7 +46,14 @@ export function createStatusApi(deps: StatusApiDeps): FastifyInstance {
         return reply.code(401).send({ error: { code: "unauthorized", message: "invalid operator token" } });
       }
     }
-    await deps.repository.markRunStatus(request.params.id, "canceled", "operator_cancel");
+    if (deps.scheduler) {
+      const canceled = await deps.scheduler.cancelRun(request.params.id, "operator_cancel");
+      if (!canceled) {
+        return reply.code(404).send({ error: { code: "not_found", message: "run not found" } });
+      }
+    } else {
+      await deps.repository.markRunStatus(request.params.id, "canceled", "operator_cancel");
+    }
     return { ok: true };
   });
 

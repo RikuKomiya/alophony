@@ -9,6 +9,7 @@ export interface CodexRunInput {
   prompt: string;
   runId: string;
   attemptId: string;
+  signal?: AbortSignal | undefined;
 }
 
 export interface CodexNormalizedEvent {
@@ -20,7 +21,7 @@ export interface CodexNormalizedEvent {
 }
 
 export interface CodexRunResult {
-  status: "succeeded" | "failed" | "timed_out" | "needs_input";
+  status: "succeeded" | "failed" | "timed_out" | "needs_input" | "canceled";
   errorCode?: string;
   errorMessage?: string;
   exitCode?: number;
@@ -37,16 +38,26 @@ function jsonLine(value: unknown): string {
 
 function eventType(value: Record<string, unknown>): string {
   const raw = value.type ?? value.event ?? value.method ?? "message";
-  return String(raw).replace(/[.-]/g, "_");
+  return String(raw).replace(/[./-]/g, "_");
 }
 
 function normalizedEvent(value: Record<string, unknown>): CodexNormalizedEvent {
   const type = eventType(value);
   const result = typeof value.result === "object" && value.result !== null ? (value.result as Record<string, unknown>) : {};
   const params = typeof value.params === "object" && value.params !== null ? (value.params as Record<string, unknown>) : {};
+  const threadObject = typeof result.thread === "object" && result.thread !== null
+    ? result.thread as Record<string, unknown>
+    : typeof params.thread === "object" && params.thread !== null
+      ? params.thread as Record<string, unknown>
+      : {};
+  const turnObject = typeof result.turn === "object" && result.turn !== null
+    ? result.turn as Record<string, unknown>
+    : typeof params.turn === "object" && params.turn !== null
+      ? params.turn as Record<string, unknown>
+      : {};
   const payload = { ...value };
-  const thread = value.thread_id ?? value.threadId ?? result.thread_id ?? result.threadId ?? params.thread_id ?? params.threadId;
-  const turn = value.turn_id ?? value.turnId ?? result.turn_id ?? result.turnId ?? params.turn_id ?? params.turnId;
+  const thread = value.thread_id ?? value.threadId ?? result.thread_id ?? result.threadId ?? params.thread_id ?? params.threadId ?? threadObject.id;
+  const turn = value.turn_id ?? value.turnId ?? result.turn_id ?? result.turnId ?? params.turn_id ?? params.turnId ?? turnObject.id;
   return {
     type,
     ...(typeof value.message === "string" ? { message: value.message } : {}),
@@ -57,17 +68,35 @@ function normalizedEvent(value: Record<string, unknown>): CodexNormalizedEvent {
 }
 
 function isTerminalSuccess(type: string, payload: Record<string, unknown>): boolean {
-  const status = payload.status;
-  return ["turn_finished", "session_finished", "completed", "done", "succeeded"].includes(type) || status === "succeeded";
+  const status = payload.status ?? turnStatus(payload);
+  return ["turn_finished", "turn_completed", "session_finished", "completed", "done", "succeeded"].includes(type)
+    || status === "succeeded"
+    || status === "completed";
 }
 
 function isTerminalFailure(type: string, payload: Record<string, unknown>): boolean {
-  const status = payload.status;
-  return ["session_failed", "turn_failed", "failed", "error"].includes(type) || status === "failed";
+  const status = payload.status ?? turnStatus(payload);
+  return ["session_failed", "turn_failed", "failed", "error"].includes(type) || Boolean(payload.error) || status === "failed";
 }
 
 function isNeedsInput(type: string): boolean {
   return type === "user_input_requested" || type === "input_required" || type === "needs_input";
+}
+
+function turnStatus(payload: Record<string, unknown>): unknown {
+  const params = typeof payload.params === "object" && payload.params !== null ? payload.params as Record<string, unknown> : {};
+  const turn = typeof params.turn === "object" && params.turn !== null ? params.turn as Record<string, unknown> : {};
+  return turn.status;
+}
+
+function errorMessage(payload: Record<string, unknown>): string {
+  const error = typeof payload.error === "object" && payload.error !== null ? payload.error as Record<string, unknown> : {};
+  return String(payload.error_message ?? payload.message ?? error.message ?? "Codex app-server reported failure");
+}
+
+function errorCode(payload: Record<string, unknown>): string {
+  const error = typeof payload.error === "object" && payload.error !== null ? payload.error as Record<string, unknown> : {};
+  return String(payload.error_code ?? payload.code ?? error.code ?? "codex_failure");
 }
 
 export class CodexAppServerClient {
@@ -75,6 +104,13 @@ export class CodexAppServerClient {
 
   async run(input: CodexRunInput, sink: CodexEventSink): Promise<CodexRunResult> {
     await mkdir(input.workspacePath, { recursive: true });
+    if (input.signal?.aborted) {
+      return {
+        status: "canceled",
+        errorCode: "canceled",
+        errorMessage: "Codex run canceled before start",
+      };
+    }
     const child = spawn(this.config.command, {
       cwd: input.workspacePath,
       shell: true,
@@ -90,6 +126,7 @@ export class CodexAppServerClient {
     let timeoutResult: CodexRunResult | undefined;
     let lastStdoutAt = Date.now();
     const stderr: string[] = [];
+    let turnStarted = false;
 
     const startupTimer = setTimeout(() => {
       if (!settled && Date.now() - lastStdoutAt >= this.config.startupTimeoutMs) {
@@ -125,6 +162,7 @@ export class CodexAppServerClient {
     }, this.config.turnTimeoutMs);
 
     const final = new Promise<CodexRunResult>((resolve) => {
+      let abort: (() => void) | undefined;
       const finish = (result: CodexRunResult) => {
         if (settled && result.status !== "timed_out") {
           return;
@@ -133,6 +171,9 @@ export class CodexAppServerClient {
         clearTimeout(startupTimer);
         clearTimeout(turnTimer);
         clearInterval(idleTimer);
+        if (abort) {
+          input.signal?.removeEventListener("abort", abort);
+        }
         resolve({
           ...result,
           ...(processPid ? { processPid } : {}),
@@ -140,6 +181,16 @@ export class CodexAppServerClient {
           ...(codexTurnId ? { codexTurnId } : {}),
         });
       };
+      abort = () => {
+        finish({
+          status: "canceled",
+          errorCode: "canceled",
+          errorMessage: "Codex run canceled",
+        });
+        killChild(child);
+      };
+
+      input.signal?.addEventListener("abort", abort, { once: true });
 
       child.stderr.on("data", (chunk: Buffer) => {
         stderr.push(chunk.toString("utf8"));
@@ -158,6 +209,37 @@ export class CodexAppServerClient {
             codexThreadId = event.codexThreadId ?? codexThreadId;
             codexTurnId = event.codexTurnId ?? codexTurnId;
             await sink(event);
+            if (Number(parsed.id) === 1 && !codexThreadId) {
+              send({ jsonrpc: "2.0", method: "initialized", params: {} });
+              send({
+                jsonrpc: "2.0",
+                id: 2,
+                method: "thread/start",
+                params: {
+                  cwd: input.workspacePath,
+                  model: this.config.model ?? null,
+                  approvalPolicy: this.config.approvalPolicy,
+                  sandbox: this.config.sandboxPolicy,
+                  ephemeral: true,
+                  sessionStartSource: "startup",
+                },
+              });
+            }
+            if (codexThreadId && !turnStarted && (Number(parsed.id) === 2 || event.type === "thread_started")) {
+              turnStarted = true;
+              send({
+                jsonrpc: "2.0",
+                id: 3,
+                method: "turn/start",
+                params: {
+                  threadId: codexThreadId,
+                  input: [{ type: "text", text: input.prompt }],
+                  cwd: input.workspacePath,
+                  approvalPolicy: this.config.approvalPolicy,
+                  model: this.config.model ?? null,
+                },
+              });
+            }
             if (isNeedsInput(event.type)) {
               finish({
                 status: "needs_input",
@@ -175,8 +257,8 @@ export class CodexAppServerClient {
             if (isTerminalFailure(event.type, parsed)) {
               finish({
                 status: "failed",
-                errorCode: String(parsed.error_code ?? parsed.code ?? "codex_failure"),
-                errorMessage: String(parsed.error_message ?? parsed.message ?? "Codex app-server reported failure"),
+                errorCode: errorCode(parsed),
+                errorMessage: errorMessage(parsed),
               });
               killChild(child);
             }
@@ -213,19 +295,12 @@ export class CodexAppServerClient {
       id: 1,
       method: "initialize",
       params: {
-        model: this.config.model,
-        approvalPolicy: this.config.approvalPolicy,
-        sandboxPolicy: this.config.sandboxPolicy,
-      },
-    });
-    send({
-      jsonrpc: "2.0",
-      id: 2,
-      method: "turn.create",
-      params: {
-        prompt: input.prompt,
-        runId: input.runId,
-        attemptId: input.attemptId,
+        clientInfo: {
+          name: "alophony",
+          title: "Alophony",
+          version: "0.1.0",
+        },
+        capabilities: null,
       },
     });
 

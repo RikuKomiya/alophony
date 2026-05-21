@@ -95,7 +95,7 @@ program.command("start").description("start daemon").option("--api", "enable sta
   await scheduler.startupRecovery();
   scheduler.start();
 
-  const api = config.api.enabled ? createStatusApi({ config: config.api, repository }) : undefined;
+  const api = config.api.enabled ? createStatusApi({ config: config.api, repository, scheduler }) : undefined;
   if (api) {
     await api.listen({ host: config.api.host, port: config.api.port });
     logger.info({ port: config.api.port }, "status api listening");
@@ -115,6 +115,7 @@ program.command("start").description("start daemon").option("--api", "enable sta
 program.command("status").description("print runtime snapshot").action(async () => {
   const config = await loadFromProgram();
   const db = createDbClient(config.database);
+  await runMigrations(db, path.resolve(config.database.migrationsDir));
   const repository = new RunRepository(db);
   const runs = await repository.listRuns(50);
   db.close();

@@ -10,10 +10,24 @@ function write(value) {
 rl.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialize") {
-    write({ jsonrpc: "2.0", id: message.id, result: { thread_id: "thread_fake" }, type: "session_started" });
+    write({ jsonrpc: "2.0", id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOs: "test" } });
   }
-  if (message.method === "turn.create") {
-    write({ type: "turn_started", turn_id: "turn_fake" });
+  if (message.method === "thread/start") {
+    write({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: {
+        thread: { id: "thread_fake" },
+        model: "fake",
+        modelProvider: "fake",
+        serviceTier: null,
+        cwd: process.cwd(),
+      },
+    });
+    write({ method: "thread/started", params: { thread: { id: "thread_fake" } } });
+  }
+  if (message.method === "turn/start" || message.method === "turn.create") {
+    write({ method: "turn/started", params: { threadId: "thread_fake", turn: { id: "turn_fake" } } });
     write({ type: "assistant_message", message: "working" });
     if (mode === "needs-input") {
       write({ type: "user_input_requested", message: "input required" });
@@ -25,7 +39,14 @@ rl.on("line", (line) => {
       setTimeout(() => process.exit(1), 10);
       return;
     }
-    write({ type: "turn_finished", status: "succeeded", thread_id: "thread_fake", turn_id: "turn_fake" });
+    if (mode === "slow") {
+      setTimeout(() => {
+        write({ method: "turn/completed", params: { threadId: "thread_fake", turn: { id: "turn_fake", status: "completed" } } });
+        setTimeout(() => process.exit(0), 10);
+      }, 500);
+      return;
+    }
+    write({ method: "turn/completed", params: { threadId: "thread_fake", turn: { id: "turn_fake", status: "completed" } } });
     setTimeout(() => process.exit(0), 10);
   }
 });
