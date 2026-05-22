@@ -36,6 +36,10 @@ describe("RunRepository", () => {
       identifier: "TEST-1",
       title: "Title",
       state: "Todo",
+      priority: null,
+      labels: [],
+      blockedBy: [],
+      createdAt: new Date().toISOString(),
       raw: {},
       updatedAt: new Date().toISOString(),
     };

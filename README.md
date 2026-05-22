@@ -42,7 +42,36 @@ bunx tsx src/cli/index.ts validate \
 
 ## Configuration
 
-Config is resolved in this order:
+The preferred configuration contract is `WORKFLOW.md` in the current directory, or an explicit path passed with `--workflow`.
+When a workflow file is present, YAML front matter becomes the config object and the trimmed Markdown body becomes the prompt template.
+Environment variables are only read when explicitly referenced as `$VAR_NAME` in workflow front matter; they do not globally override workflow values.
+
+Example `WORKFLOW.md`:
+
+```md
+---
+tracker:
+  kind: linear
+  projectSlug: ENG
+  activeStates: [Todo, In Progress]
+  terminalStates: [Done, Canceled, Cancelled, Duplicate]
+  apiToken: $LINEAR_API_TOKEN
+database:
+  url: $TURSO_DATABASE_URL
+  authToken: $TURSO_AUTH_TOKEN
+workspace:
+  root: .alophony/workspaces
+codex:
+  command: codex app-server
+  approvalPolicy: never
+  sandboxPolicy: workspace-write
+---
+Work on {{ issue.identifier }}: {{ issue.title }}
+
+{{ issue.description }}
+```
+
+Legacy config is still supported when no workflow file is present. Legacy config is resolved in this order:
 
 1. Built-in defaults
 2. `alophony.config.ts`, `alophony.config.js`, `alophony.config.mjs`, or `alophony.config.json`
@@ -95,8 +124,12 @@ The built package exposes the same commands through `alophony`.
 
 When `api.enabled` or `start --api` is used:
 
+- `GET /`
 - `GET /healthz`
 - `GET /readyz`
+- `GET /api/v1/state`
+- `GET /api/v1/:issue_identifier`
+- `POST /api/v1/refresh`
 - `GET /api/v1/runs`
 - `GET /api/v1/runs/:id`
 - `GET /api/v1/issues/:id`
@@ -111,8 +144,19 @@ Mutation endpoints require `api.operatorToken` when configured.
 - Turso locks are still mandatory and prevent accidental duplicate processes.
 - Tracker writes are not implemented in v1.
 - Linear is the only production tracker boundary; fake tracker is for tests and local validation.
-- Rich dashboards and distributed scheduling are intentionally out of scope.
+- The HTTP dashboard is intentionally minimal; the JSON API is the primary observability surface.
+- Distributed scheduling is intentionally out of scope.
 - Real Codex app-server protocol types are generated only when `codex.generateProtocolTypes` is enabled and the installed Codex command supports generation.
+
+## Runtime Policy
+
+- Approval policy is operator-defined config and defaults to `never`.
+- Sandbox policy is operator-defined config and defaults to `workspace-write`.
+- Interactive user input is unsupported in daemon runs. A Codex user-input request fails the attempt with `needs_input_unsupported`.
+- Hook commands and workspace contents are inside the operator trust boundary. Tokens, prompt bodies, and large raw payloads are not written to normal logs by default.
+- Unsupported dynamic tool-call requests are rejected as protocol failures rather than leaving a session stalled.
+
+See [docs/SPEC_CONFORMANCE.md](docs/SPEC_CONFORMANCE.md) for the conformance matrix.
 
 ## Verification
 

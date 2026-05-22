@@ -15,11 +15,15 @@ describe("WorkspaceManager", () => {
       identifier: "TEST 1",
       title: "Title",
       state: "Todo",
+      priority: null,
+      labels: [],
+      blockedBy: [],
+      createdAt: new Date().toISOString(),
       raw: {},
       updatedAt: new Date().toISOString(),
     });
     expect(workspace.startsWith(path.resolve(root))).toBe(true);
-    expect(workspace).toContain("test-1");
+    expect(workspace).toContain("TEST_1");
   });
 
   it("rejects root deletion", async () => {

@@ -10,6 +10,10 @@ describe("renderPrompt", () => {
     identifier: "TEST-1",
     title: "Implement",
     state: "Todo",
+    priority: null,
+    labels: [],
+    blockedBy: [],
+    createdAt: new Date().toISOString(),
     raw: {},
     updatedAt: new Date().toISOString(),
   };
