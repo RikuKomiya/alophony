@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import type { AlophonyConfig } from "../config/schema.js";
@@ -10,6 +10,7 @@ export interface CodexRunInput {
   runId: string;
   attemptId: string;
   signal?: AbortSignal | undefined;
+  nextPrompt?: ((completedTurns: number) => Promise<string | undefined>) | undefined;
 }
 
 export interface CodexNormalizedEvent {
@@ -104,6 +105,7 @@ export class CodexAppServerClient {
 
   async run(input: CodexRunInput, sink: CodexEventSink): Promise<CodexRunResult> {
     await mkdir(input.workspacePath, { recursive: true });
+    await realpath(input.workspacePath);
     if (input.signal?.aborted) {
       return {
         status: "canceled",
@@ -111,9 +113,8 @@ export class CodexAppServerClient {
         errorMessage: "Codex run canceled before start",
       };
     }
-    const child = spawn(this.config.command, {
+    const child = spawn("bash", ["-lc", this.config.command], {
       cwd: input.workspacePath,
-      shell: true,
       env: {
         ...process.env,
         ...(this.config.model ? { CODEX_MODEL: this.config.model } : {}),
@@ -127,6 +128,9 @@ export class CodexAppServerClient {
     let lastStdoutAt = Date.now();
     const stderr: string[] = [];
     let turnStarted = false;
+    let completedTurns = 0;
+    let nextTurnRpcId = 3;
+    const emittedSessions = new Set<string>();
 
     const startupTimer = setTimeout(() => {
       if (!settled && Date.now() - lastStdoutAt >= this.config.startupTimeoutMs) {
@@ -135,7 +139,7 @@ export class CodexAppServerClient {
           errorCode: "codex_startup_failure",
           errorMessage: "Codex app-server did not produce startup output before timeout",
         };
-        killChild(child);
+        killChild(child, this.config.shutdownTimeoutMs);
       }
     }, this.config.startupTimeoutMs);
 
@@ -146,7 +150,7 @@ export class CodexAppServerClient {
           errorCode: "idle_timeout",
           errorMessage: "Codex app-server idle timeout",
         };
-        killChild(child);
+        killChild(child, this.config.shutdownTimeoutMs);
       }
     }, Math.min(this.config.idleTimeoutMs, 1_000));
 
@@ -157,7 +161,7 @@ export class CodexAppServerClient {
           errorCode: "turn_timeout",
           errorMessage: "Codex app-server turn timeout",
         };
-        killChild(child);
+        killChild(child, this.config.shutdownTimeoutMs);
       }
     }, this.config.turnTimeoutMs);
 
@@ -187,7 +191,7 @@ export class CodexAppServerClient {
           errorCode: "canceled",
           errorMessage: "Codex run canceled",
         });
-        killChild(child);
+        killChild(child, this.config.shutdownTimeoutMs);
       };
 
       input.signal?.addEventListener("abort", abort, { once: true });
@@ -227,18 +231,20 @@ export class CodexAppServerClient {
             }
             if (codexThreadId && !turnStarted && (Number(parsed.id) === 2 || event.type === "thread_started")) {
               turnStarted = true;
-              send({
-                jsonrpc: "2.0",
-                id: 3,
-                method: "turn/start",
-                params: {
-                  threadId: codexThreadId,
-                  input: [{ type: "text", text: input.prompt }],
-                  cwd: input.workspacePath,
-                  approvalPolicy: this.config.approvalPolicy,
-                  model: this.config.model ?? null,
-                },
-              });
+              sendTurn(input.prompt);
+            }
+            if (codexThreadId && codexTurnId) {
+              const sessionId = `${codexThreadId}-${codexTurnId}`;
+              if (!emittedSessions.has(sessionId)) {
+                emittedSessions.add(sessionId);
+                await sink({
+                  type: "session_started",
+                  message: "Codex session started",
+                  payload: { session_id: sessionId, thread_id: codexThreadId, turn_id: codexTurnId },
+                  codexThreadId,
+                  codexTurnId,
+                });
+              }
             }
             if (isNeedsInput(event.type)) {
               finish({
@@ -246,12 +252,18 @@ export class CodexAppServerClient {
                 errorCode: "needs_input_unsupported",
                 errorMessage: "Codex requested interactive user input, which is unsupported in v1",
               });
-              killChild(child);
+              killChild(child, this.config.shutdownTimeoutMs);
               return;
             }
             if (isTerminalSuccess(event.type, parsed)) {
+              completedTurns += 1;
+              const nextPrompt = await input.nextPrompt?.(completedTurns);
+              if (nextPrompt) {
+                sendTurn(nextPrompt);
+                return;
+              }
               finish({ status: "succeeded" });
-              killChild(child);
+              killChild(child, this.config.shutdownTimeoutMs);
               return;
             }
             if (isTerminalFailure(event.type, parsed)) {
@@ -260,7 +272,7 @@ export class CodexAppServerClient {
                 errorCode: errorCode(parsed),
                 errorMessage: errorMessage(parsed),
               });
-              killChild(child);
+              killChild(child, this.config.shutdownTimeoutMs);
             }
           } catch (error) {
             finish({
@@ -268,7 +280,7 @@ export class CodexAppServerClient {
               errorCode: "invalid_codex_json",
               errorMessage: error instanceof Error ? error.message : String(error),
             });
-            killChild(child);
+            killChild(child, this.config.shutdownTimeoutMs);
           }
         })();
       });
@@ -290,6 +302,20 @@ export class CodexAppServerClient {
     });
 
     const send = (message: unknown) => child.stdin.write(jsonLine(message));
+    const sendTurn = (prompt: string) => {
+      send({
+        jsonrpc: "2.0",
+        id: nextTurnRpcId++,
+        method: "turn/start",
+        params: {
+          threadId: codexThreadId,
+          input: [{ type: "text", text: prompt }],
+          cwd: input.workspacePath,
+          approvalPolicy: this.config.approvalPolicy,
+          model: this.config.model ?? null,
+        },
+      });
+    };
     send({
       jsonrpc: "2.0",
       id: 1,
@@ -309,7 +335,7 @@ export class CodexAppServerClient {
   }
 }
 
-function killChild(child: ChildProcessWithoutNullStreams): void {
+function killChild(child: ChildProcessWithoutNullStreams, shutdownTimeoutMs = 1_000): void {
   if (child.killed) {
     return;
   }
@@ -318,14 +344,13 @@ function killChild(child: ChildProcessWithoutNullStreams): void {
     if (!child.killed) {
       child.kill("SIGKILL");
     }
-  }, 1_000).unref();
+  }, shutdownTimeoutMs).unref();
 }
 
 export async function generateCodexProtocolTypes(command: string, outDir: string): Promise<boolean> {
   await mkdir(outDir, { recursive: true });
   return new Promise((resolve) => {
-    const child = spawn(`${command} generate-ts --out ${JSON.stringify(path.resolve(outDir))}`, {
-      shell: true,
+    const child = spawn("bash", ["-lc", `${command} generate-ts --out ${JSON.stringify(path.resolve(outDir))}`], {
       stdio: "ignore",
     });
     child.on("exit", (code) => resolve(code === 0));
