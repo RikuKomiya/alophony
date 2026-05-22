@@ -12,12 +12,17 @@ interface FakeIssueInput {
   description?: string;
   url?: string;
   assignee?: string;
-  priority?: string;
+  priority?: number | string | null;
+  branchName?: string;
+  labels?: string[];
   blockers?: string[];
+  blockedBy?: string[];
+  createdAt?: string;
   updatedAt?: string;
 }
 
 function normalize(input: FakeIssueInput): NormalizedIssue {
+  const updatedAt = input.updatedAt ?? nowIso();
   return {
     id: issueDbId("fake", input.id),
     trackerKind: "fake",
@@ -28,9 +33,16 @@ function normalize(input: FakeIssueInput): NormalizedIssue {
     ...(input.description ? { description: input.description } : {}),
     ...(input.url ? { url: input.url } : {}),
     ...(input.assignee ? { assignee: input.assignee } : {}),
-    ...(input.priority ? { priority: input.priority } : {}),
+    priority: input.priority === undefined || input.priority === null || input.priority === "" ? null : Number(input.priority),
+    ...(input.branchName ? { branchName: input.branchName, branch_name: input.branchName } : {}),
+    labels: (input.labels ?? []).map((label) => label.toLowerCase()),
+    blockedBy: input.blockedBy ?? input.blockers ?? [],
+    blocked_by: input.blockedBy ?? input.blockers ?? [],
+    createdAt: input.createdAt ?? updatedAt,
+    created_at: input.createdAt ?? updatedAt,
     raw: input,
-    updatedAt: input.updatedAt ?? nowIso(),
+    updatedAt,
+    updated_at: updatedAt,
   };
 }
 

@@ -7,5 +7,5 @@ export function createTrackerClient(config: AlophonyConfig): TrackerClient {
   if (config.tracker.kind === "fake") {
     return new FakeTrackerClient();
   }
-  return new LinearTrackerClient(config.tracker.apiToken);
+  return new LinearTrackerClient(config.tracker.apiToken, config.tracker.endpoint, config.tracker.requestTimeoutMs);
 }

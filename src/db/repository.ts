@@ -78,9 +78,9 @@ export class RunRepository {
       sql: `
         INSERT INTO issues (
           id, tracker_kind, tracker_issue_id, identifier, title, state, description,
-          url, assignee, priority, raw_json, seen_at, updated_at
+          url, assignee, priority, branch_name, labels_json, blocked_by_json, issue_created_at, raw_json, seen_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(tracker_kind, tracker_issue_id) DO UPDATE SET
           identifier = excluded.identifier,
           title = excluded.title,
@@ -89,6 +89,10 @@ export class RunRepository {
           url = excluded.url,
           assignee = excluded.assignee,
           priority = excluded.priority,
+          branch_name = excluded.branch_name,
+          labels_json = excluded.labels_json,
+          blocked_by_json = excluded.blocked_by_json,
+          issue_created_at = excluded.issue_created_at,
           raw_json = excluded.raw_json,
           seen_at = excluded.seen_at,
           updated_at = excluded.updated_at
@@ -104,6 +108,10 @@ export class RunRepository {
         issue.url ?? null,
         issue.assignee ?? null,
         issue.priority ?? null,
+        issue.branchName ?? issue.branch_name ?? null,
+        JSON.stringify(issue.labels),
+        JSON.stringify(issue.blockedBy ?? issue.blocked_by ?? []),
+        issue.createdAt ?? issue.created_at ?? null,
         JSON.stringify(issue.raw),
         at,
         issue.updatedAt,
@@ -130,9 +138,16 @@ export class RunRepository {
       ...(stringValue(row, "description") ? { description: stringValue(row, "description") } : {}),
       ...(stringValue(row, "url") ? { url: stringValue(row, "url") } : {}),
       ...(stringValue(row, "assignee") ? { assignee: stringValue(row, "assignee") } : {}),
-      ...(stringValue(row, "priority") ? { priority: stringValue(row, "priority") } : {}),
+      priority: numberValue(row, "priority") ?? null,
+      ...(stringValue(row, "branch_name") ? { branchName: stringValue(row, "branch_name"), branch_name: stringValue(row, "branch_name") } : {}),
+      labels: JSON.parse(String(row.labels_json ?? "[]")) as string[],
+      blockedBy: JSON.parse(String(row.blocked_by_json ?? "[]")) as string[],
+      blocked_by: JSON.parse(String(row.blocked_by_json ?? "[]")) as string[],
+      createdAt: stringValue(row, "issue_created_at") ?? String(row.updated_at),
+      created_at: stringValue(row, "issue_created_at") ?? String(row.updated_at),
       raw: JSON.parse(String(row.raw_json)),
       updatedAt: String(row.updated_at),
+      updated_at: String(row.updated_at),
     };
   }
 
@@ -155,9 +170,48 @@ export class RunRepository {
       ...(stringValue(row, "description") ? { description: stringValue(row, "description") } : {}),
       ...(stringValue(row, "url") ? { url: stringValue(row, "url") } : {}),
       ...(stringValue(row, "assignee") ? { assignee: stringValue(row, "assignee") } : {}),
-      ...(stringValue(row, "priority") ? { priority: stringValue(row, "priority") } : {}),
+      priority: numberValue(row, "priority") ?? null,
+      ...(stringValue(row, "branch_name") ? { branchName: stringValue(row, "branch_name"), branch_name: stringValue(row, "branch_name") } : {}),
+      labels: JSON.parse(String(row.labels_json ?? "[]")) as string[],
+      blockedBy: JSON.parse(String(row.blocked_by_json ?? "[]")) as string[],
+      blocked_by: JSON.parse(String(row.blocked_by_json ?? "[]")) as string[],
+      createdAt: stringValue(row, "issue_created_at") ?? String(row.updated_at),
+      created_at: stringValue(row, "issue_created_at") ?? String(row.updated_at),
       raw: JSON.parse(String(row.raw_json)),
       updatedAt: String(row.updated_at),
+      updated_at: String(row.updated_at),
+    };
+  }
+
+  async getIssueByIdentifier(identifier: string): Promise<NormalizedIssue | undefined> {
+    const result = await this.client.execute({
+      sql: "SELECT * FROM issues WHERE identifier = ? ORDER BY updated_at DESC LIMIT 1",
+      args: [identifier],
+    });
+    const row = result.rows[0];
+    if (!row) {
+      return undefined;
+    }
+    return {
+      id: String(row.id),
+      trackerKind: String(row.tracker_kind),
+      trackerIssueId: String(row.tracker_issue_id),
+      identifier: String(row.identifier),
+      title: String(row.title),
+      state: String(row.state),
+      ...(stringValue(row, "description") ? { description: stringValue(row, "description") } : {}),
+      ...(stringValue(row, "url") ? { url: stringValue(row, "url") } : {}),
+      ...(stringValue(row, "assignee") ? { assignee: stringValue(row, "assignee") } : {}),
+      priority: numberValue(row, "priority") ?? null,
+      ...(stringValue(row, "branch_name") ? { branchName: stringValue(row, "branch_name"), branch_name: stringValue(row, "branch_name") } : {}),
+      labels: JSON.parse(String(row.labels_json ?? "[]")) as string[],
+      blockedBy: JSON.parse(String(row.blocked_by_json ?? "[]")) as string[],
+      blocked_by: JSON.parse(String(row.blocked_by_json ?? "[]")) as string[],
+      createdAt: stringValue(row, "issue_created_at") ?? String(row.updated_at),
+      created_at: stringValue(row, "issue_created_at") ?? String(row.updated_at),
+      raw: JSON.parse(String(row.raw_json)),
+      updatedAt: String(row.updated_at),
+      updated_at: String(row.updated_at),
     };
   }
 

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
 import { createStatusApi } from "../api/status.js";
 import { generateCodexProtocolTypes } from "../codex/client.js";
 import { loadConfig, type CliConfigOverrides } from "../config/load.js";
+import { defaultWorkflowPath, watchWorkflowConfig } from "../config/workflow.js";
 import { createDbClient } from "../db/client.js";
 import { runMigrations } from "../db/migrations.js";
 import { RunRepository } from "../db/repository.js";
@@ -19,6 +21,7 @@ const program = new Command();
 program
   .name("alophony")
   .description("TypeScript/Turso/Codex app-server orchestration daemon")
+  .option("-w, --workflow <path>", "WORKFLOW.md path")
   .option("-c, --config <path>", "config file path")
   .option("--database-url <url>", "Turso/libSQL database URL")
   .option("--database-auth-token <token>", "Turso auth token")
@@ -93,6 +96,13 @@ program.command("start").description("start daemon").option("--api", "enable sta
     logger,
   });
   await scheduler.startupRecovery();
+  const rootOpts = program.opts<{ workflow?: string }>();
+  const workflowPath = rootOpts.workflow
+    ? path.resolve(rootOpts.workflow)
+    : defaultWorkflowPath();
+  const workflowWatcher = existsSync(workflowPath)
+    ? watchWorkflowConfig({ workflowPath, config, logger })
+    : undefined;
   scheduler.start();
 
   const api = config.api.enabled ? createStatusApi({ config: config.api, repository, scheduler }) : undefined;
@@ -105,6 +115,7 @@ program.command("start").description("start daemon").option("--api", "enable sta
     if (api) {
       await api.close();
     }
+    workflowWatcher?.close();
     db.close();
     process.exit(0);
   };
@@ -160,6 +171,7 @@ function parseNumber(value: string): number {
 async function loadFromProgram(extra: CliConfigOverrides = {}) {
   const opts = program.opts<{
     config?: string;
+    workflow?: string;
     databaseUrl?: string;
     databaseAuthToken?: string;
     trackerKind?: "linear" | "fake";
@@ -174,6 +186,7 @@ async function loadFromProgram(extra: CliConfigOverrides = {}) {
   }>();
   return loadConfig({
     configPath: opts.config,
+    workflowPath: opts.workflow,
     databaseUrl: opts.databaseUrl,
     databaseAuthToken: opts.databaseAuthToken,
     trackerKind: opts.trackerKind,

@@ -3,9 +3,17 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ConfigSchema, DEFAULT_CONFIG, type AlophonyConfig, type PartialAlophonyConfig } from "./schema.js";
+import {
+  buildWorkflowConfig,
+  deepMerge,
+  defaultWorkflowPath,
+  loadWorkflowFile,
+  WorkflowLoaderError,
+} from "./workflow.js";
 
 export interface CliConfigOverrides {
   configPath?: string | undefined;
+  workflowPath?: string | undefined;
   databaseUrl?: string | undefined;
   databaseAuthToken?: string | undefined;
   trackerKind?: "linear" | "fake" | undefined;
@@ -19,22 +27,6 @@ export interface CliConfigOverrides {
   apiEnabled?: boolean | undefined;
   apiPort?: number | undefined;
   logLevel?: string | undefined;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function deepMerge<T>(base: T, override: unknown): T {
-  if (!isPlainObject(base) || !isPlainObject(override)) {
-    return (override === undefined ? base : override) as T;
-  }
-  const merged: Record<string, unknown> = { ...base };
-  for (const [key, value] of Object.entries(override)) {
-    const current = merged[key];
-    merged[key] = isPlainObject(current) && isPlainObject(value) ? deepMerge(current, value) : value;
-  }
-  return merged as T;
 }
 
 async function loadConfigFile(configPath?: string): Promise<PartialAlophonyConfig> {
@@ -130,6 +122,17 @@ function cliConfig(overrides: CliConfigOverrides): PartialAlophonyConfig {
 }
 
 export async function loadConfig(overrides: CliConfigOverrides = {}): Promise<AlophonyConfig> {
+  const workflowPath = overrides.workflowPath ? path.resolve(overrides.workflowPath) : defaultWorkflowPath();
+  if (overrides.workflowPath || existsSync(workflowPath)) {
+    const workflow = await loadWorkflowFile(workflowPath);
+    return buildWorkflowConfig(workflow, cliConfig(overrides));
+  }
+  if (!overrides.configPath && !existsSync(workflowPath)) {
+    // Keep the legacy config path functional while making explicit workflow
+    // paths fail with the typed missing_workflow_file error.
+  } else if (overrides.workflowPath) {
+    throw new WorkflowLoaderError("missing_workflow_file", `workflow file not found: ${workflowPath}`, workflowPath);
+  }
   const fromFile = await loadConfigFile(overrides.configPath);
   const merged1 = deepMerge(DEFAULT_CONFIG, fromFile);
   const merged2 = deepMerge(merged1, envConfig(process.env));

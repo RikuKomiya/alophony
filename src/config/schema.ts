@@ -9,6 +9,19 @@ export const RetryPolicySchema = z.object({
   backoffMultiplier: z.number().min(1).default(2),
 });
 
+export const HooksSchema = z
+  .object({
+    beforeCreate: z.string().optional(),
+    afterCreate: z.string().optional(),
+    beforeRun: z.string().optional(),
+    afterRun: z.string().optional(),
+    beforeRemove: z.string().optional(),
+    beforeCleanup: z.string().optional(),
+    timeoutMs: z.number().int().min(1).default(60_000),
+    required: z.boolean().default(false),
+  })
+  .default({ timeoutMs: 60_000, required: false });
+
 export const ConfigSchema = z.object({
   tracker: z.object({
     kind: z.enum(["linear", "fake"]).default("linear"),
@@ -16,6 +29,8 @@ export const ConfigSchema = z.object({
     activeStates: z.array(nonEmptyString).min(1),
     terminalStates: z.array(nonEmptyString).min(1),
     apiToken: z.string().optional(),
+    endpoint: nonEmptyString.default("https://api.linear.app/graphql"),
+    requestTimeoutMs: z.number().int().min(1).default(30_000),
     fakeIssuesPath: z.string().optional(),
   }),
   database: z.object({
@@ -25,17 +40,7 @@ export const ConfigSchema = z.object({
   }),
   workspace: z.object({
     root: nonEmptyString,
-    hooks: z
-      .object({
-        beforeCreate: z.string().optional(),
-        afterCreate: z.string().optional(),
-        beforeRun: z.string().optional(),
-        afterRun: z.string().optional(),
-        beforeCleanup: z.string().optional(),
-        timeoutMs: z.number().int().min(1).default(30_000),
-        required: z.boolean().default(false),
-      })
-      .default({ timeoutMs: 30_000, required: false }),
+    hooks: HooksSchema,
   }),
   scheduler: z.object({
     pollIntervalMs: z.number().int().min(100).default(30_000),
@@ -44,6 +49,19 @@ export const ConfigSchema = z.object({
     lockTtlMs: z.number().int().min(1_000).default(10 * 60_000),
     lockRenewIntervalMs: z.number().int().min(100).default(30_000),
   }),
+  agent: z
+    .object({
+      maxTurns: z.number().int().min(1).default(1),
+      maxRetryBackoffMs: z.number().int().min(0).default(30_000),
+      maxConcurrentAgentsByState: z.record(z.string(), z.number().int().min(1)).default({}),
+      continuationDelayMs: z.number().int().min(0).default(1_000),
+    })
+    .default({
+      maxTurns: 1,
+      maxRetryBackoffMs: 30_000,
+      maxConcurrentAgentsByState: {},
+      continuationDelayMs: 1_000,
+    }),
   codex: z.object({
     command: nonEmptyString.default("codex app-server"),
     model: z.string().optional(),
@@ -89,6 +107,7 @@ export type PartialAlophonyConfig = {
   prompt?: Partial<AlophonyConfig["prompt"]>;
   retry?: Partial<AlophonyConfig["retry"]>;
   api?: Partial<AlophonyConfig["api"]>;
+  agent?: Partial<AlophonyConfig["agent"]>;
   logLevel?: string;
 };
 
@@ -97,6 +116,8 @@ export const DEFAULT_CONFIG: PartialAlophonyConfig = {
     kind: "linear",
     activeStates: ["Todo", "In Progress"],
     terminalStates: ["Done", "Canceled", "Cancelled", "Duplicate"],
+    endpoint: "https://api.linear.app/graphql",
+    requestTimeoutMs: 30_000,
   },
   workspace: {
     root: ".alophony/workspaces",
@@ -112,6 +133,12 @@ export const DEFAULT_CONFIG: PartialAlophonyConfig = {
     command: "codex app-server",
     approvalPolicy: "never",
     sandboxPolicy: "workspace-write",
+  },
+  agent: {
+    maxTurns: 1,
+    maxRetryBackoffMs: 30_000,
+    maxConcurrentAgentsByState: {},
+    continuationDelayMs: 1_000,
   },
   database: {
     migrationsDir: "migrations",

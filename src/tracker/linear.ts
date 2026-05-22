@@ -9,10 +9,13 @@ interface LinearIssueNode {
   title: string;
   description?: string | null;
   url?: string | null;
-  priorityLabel?: string | null;
+  priority?: number | null;
   updatedAt?: string | null;
+  createdAt?: string | null;
+  branchName?: string | null;
   assignee?: { name?: string | null } | null;
   state: { name: string };
+  labels?: { nodes?: Array<{ name?: string | null }> } | null;
 }
 
 interface LinearIssueConnection {
@@ -23,7 +26,18 @@ interface LinearIssueConnection {
   };
 }
 
-function normalize(node: LinearIssueNode): NormalizedIssue {
+export type LinearErrorCode = "linear_transport_error" | "linear_status_error" | "linear_graphql_error" | "linear_malformed_payload";
+
+export class LinearTrackerError extends Error {
+  constructor(readonly code: LinearErrorCode, message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = "LinearTrackerError";
+  }
+}
+
+function normalize(node: LinearIssueNode, blockedBy: string[] = []): NormalizedIssue {
+  const updatedAt = node.updatedAt ?? nowIso();
+  const labels = node.labels?.nodes?.flatMap((label) => label.name ? [label.name.toLowerCase()] : []) ?? [];
   return {
     id: issueDbId("linear", node.id),
     trackerKind: "linear",
@@ -34,14 +48,25 @@ function normalize(node: LinearIssueNode): NormalizedIssue {
     ...(node.description ? { description: node.description } : {}),
     ...(node.url ? { url: node.url } : {}),
     ...(node.assignee?.name ? { assignee: node.assignee.name } : {}),
-    ...(node.priorityLabel ? { priority: node.priorityLabel } : {}),
+    priority: typeof node.priority === "number" ? node.priority : null,
+    ...(node.branchName ? { branchName: node.branchName, branch_name: node.branchName } : {}),
+    labels,
+    blockedBy,
+    blocked_by: blockedBy,
+    createdAt: node.createdAt ?? updatedAt,
+    created_at: node.createdAt ?? updatedAt,
     raw: node,
-    updatedAt: node.updatedAt ?? nowIso(),
+    updatedAt,
+    updated_at: updatedAt,
   };
 }
 
 export class LinearTrackerClient implements TrackerClient {
-  constructor(private readonly apiToken: string | undefined) {}
+  constructor(
+    private readonly apiToken: string | undefined,
+    private readonly endpoint = "https://api.linear.app/graphql",
+    private readonly timeoutMs = 30_000,
+  ) {}
 
   async listCandidateIssues(config: AlophonyConfig): Promise<NormalizedIssue[]> {
     return this.fetchIssues(config, config.tracker.activeStates);
@@ -51,9 +76,10 @@ export class LinearTrackerClient implements TrackerClient {
     const data = await this.graphql<{ issue: LinearIssueNode | null }>(
       `query AlophonyIssue($id: String!) {
         issue(id: $id) {
-          id identifier title description url priorityLabel updatedAt
+          id identifier title description url priority updatedAt createdAt branchName
           assignee { name }
           state { name }
+          labels { nodes { name } }
         }
       }`,
       { id: issueId },
@@ -66,15 +92,16 @@ export class LinearTrackerClient implements TrackerClient {
   }
 
   async listBlockingIssues(issueId: string): Promise<NormalizedIssue[]> {
-    const data = await this.graphql<{ issue: { relations: { nodes: Array<{ relatedIssue: LinearIssueNode }> } } | null }>(
+    const data = await this.graphql<{ issue: { inverseRelations: { nodes: Array<{ issue: LinearIssueNode }> } } | null }>(
       `query AlophonyBlockers($id: String!) {
         issue(id: $id) {
-          relations(filter: { type: { eq: blocks } }, first: 50) {
+          inverseRelations(filter: { type: { eq: blocks } }, first: 50) {
             nodes {
-              relatedIssue {
-                id identifier title description url priorityLabel updatedAt
+              issue {
+                id identifier title description url priority updatedAt createdAt branchName
                 assignee { name }
                 state { name }
+                labels { nodes { name } }
               }
             }
           }
@@ -82,7 +109,19 @@ export class LinearTrackerClient implements TrackerClient {
       }`,
       { id: issueId },
     );
-    return data.issue?.relations.nodes.map((node) => normalize(node.relatedIssue)) ?? [];
+    return data.issue?.inverseRelations.nodes.map((node) => normalize(node.issue)) ?? [];
+  }
+
+  async fetchIssueStatesByIds(issueIds: string[]): Promise<Map<string, string>> {
+    const data = await this.graphql<{ issues: { nodes: Array<{ id: string; state: { name: string } }> } }>(
+      `query AlophonyIssueStates($ids: [ID!]) {
+        issues(filter: { id: { in: $ids } }, first: 100) {
+          nodes { id state { name } }
+        }
+      }`,
+      { ids: issueIds },
+    );
+    return new Map(data.issues.nodes.map((issue) => [issue.id, issue.state.name]));
   }
 
   private async fetchIssues(config: AlophonyConfig, states: string[]): Promise<NormalizedIssue[]> {
@@ -100,16 +139,20 @@ export class LinearTrackerClient implements TrackerClient {
             }
           ) {
             nodes {
-              id identifier title description url priorityLabel updatedAt
+              id identifier title description url priority updatedAt createdAt branchName
               assignee { name }
               state { name }
+              labels { nodes { name } }
             }
             pageInfo { hasNextPage endCursor }
           }
         }`,
         { projectSlug: config.tracker.projectSlug, states, after },
       );
-      issues.push(...data.issues.nodes.map(normalize));
+      issues.push(...data.issues.nodes.map((node) => normalize(node)));
+      if (data.issues.pageInfo?.hasNextPage && !data.issues.pageInfo.endCursor) {
+        throw new LinearTrackerError("linear_malformed_payload", "Linear pagination hasNextPage=true without endCursor");
+      }
       after = data.issues.pageInfo?.endCursor ?? undefined;
       if (!data.issues.pageInfo?.hasNextPage) {
         after = undefined;
@@ -120,25 +163,40 @@ export class LinearTrackerClient implements TrackerClient {
 
   private async graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
     if (!this.apiToken) {
-      throw new Error("Linear API token is required");
+      throw new LinearTrackerError("linear_transport_error", "Linear API token is required");
     }
-    const response = await fetch("https://api.linear.app/graphql", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: this.apiToken,
-      },
-      body: JSON.stringify({ query, variables }),
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(this.endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: this.apiToken,
+        },
+        body: JSON.stringify({ query, variables }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      throw new LinearTrackerError("linear_transport_error", "Linear GraphQL transport failed", error);
+    } finally {
+      clearTimeout(timer);
+    }
     if (!response.ok) {
-      throw new Error(`Linear GraphQL request failed: ${response.status} ${response.statusText}`);
+      throw new LinearTrackerError("linear_status_error", `Linear GraphQL request failed: ${response.status} ${response.statusText}`);
     }
-    const payload = (await response.json()) as { data?: T; errors?: Array<{ message: string }> };
+    let payload: { data?: T; errors?: Array<{ message: string }> };
+    try {
+      payload = (await response.json()) as { data?: T; errors?: Array<{ message: string }> };
+    } catch (error) {
+      throw new LinearTrackerError("linear_malformed_payload", "Linear GraphQL response was not JSON", error);
+    }
     if (payload.errors?.length) {
-      throw new Error(`Linear GraphQL error: ${payload.errors.map((error) => error.message).join("; ")}`);
+      throw new LinearTrackerError("linear_graphql_error", `Linear GraphQL error: ${payload.errors.map((error) => error.message).join("; ")}`);
     }
     if (!payload.data) {
-      throw new Error("Linear GraphQL response did not include data");
+      throw new LinearTrackerError("linear_malformed_payload", "Linear GraphQL response did not include data");
     }
     return payload.data;
   }

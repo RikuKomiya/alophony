@@ -7,6 +7,7 @@ export interface TrackerClient {
   getIssue(issueId: string): Promise<NormalizedIssue | null>;
   listTerminalIssues(config: AlophonyConfig): Promise<NormalizedIssue[]>;
   listBlockingIssues(issueId: string): Promise<NormalizedIssue[]>;
+  fetchIssueStatesByIds?(issueIds: string[]): Promise<Map<string, string>>;
 }
 
 export function issueDbId(trackerKind: string, trackerIssueId: string): string {

@@ -10,9 +10,17 @@ export interface NormalizedIssue {
   description?: string | undefined;
   url?: string | undefined;
   assignee?: string | undefined;
-  priority?: string | undefined;
+  priority: number | null;
+  branchName?: string | undefined;
+  branch_name?: string | undefined;
+  labels: string[];
+  blockedBy: string[];
+  blocked_by?: string[] | undefined;
+  createdAt: string;
+  created_at?: string | undefined;
   raw: unknown;
   updatedAt: string;
+  updated_at?: string | undefined;
 }
 
 export type RunStatus =
@@ -74,4 +82,15 @@ export interface RunEventRecord {
   message?: string | undefined;
   payload: unknown;
   createdAt: string;
+}
+
+export interface CodexUsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
+export interface CodexRateLimitSnapshot {
+  payload: unknown;
+  observedAt: string;
 }
